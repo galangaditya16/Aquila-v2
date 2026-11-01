@@ -1,0 +1,15 @@
+{
+	"fixed": {
+		"file_version": "1.0.6"
+	},
+	"info": {
+		"0409": {
+			"ProductVersion": "1.0.6",
+			"CompanyName": "CV ANAK BANGSA",
+			"FileDescription": "Panel kendali print server lokal Aquila",
+			"LegalCopyright": "(c) 2026, CV ANAK BANGSA",
+			"ProductName": "Aquila",
+			"Comments": "Print server lokal lintas platform"
+		}
+	}
+}

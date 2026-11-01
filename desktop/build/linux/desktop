@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Name=Aquila
+Comment=Panel kendali print server lokal Aquila
+# The Exec line includes %u to pass the URL to the application
+Exec=/usr/local/bin/aquila %u
+Terminal=false
+Type=Application
+Icon=aquila
+Categories=Utility;
+StartupWMClass=aquila
+
+ 

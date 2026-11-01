@@ -1,0 +1,7 @@
+{
+  "listen": "127.0.0.1:17891",
+  "allowed_origins": [
+    "https://farmasi.example.org",
+    "http://localhost:4200"
+  ]
+}

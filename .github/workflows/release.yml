@@ -1,0 +1,223 @@
+# Merakit installer Aquila untuk macOS, Windows, dan Linux lalu menerbitkannya
+# ke halaman GitHub Releases saat sebuah tag v* didorong.
+#
+# Alur:
+#   git tag v1.0.4 && git push origin v1.0.4
+#   → build-macos  : Aquila-macOS-universal.dmg + Aquila-macOS-universal.pkg
+#   → build-windows: Aquila-windows-amd64-installer.exe (NSIS) + Aquila-windows-amd64.exe
+#   → build-linux  : aquila_<versi>_amd64.deb + aquila-<versi>-1.x86_64.rpm + Aquila-linux-amd64.tar.gz
+#   → release      : checksums.txt + unggah aset ke Release
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  meta:
+    name: Info versi
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.info.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: info
+        name: Tentukan versi dari tag (atau nfpm.yaml)
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          else
+            V=$(grep -m1 '^version:' desktop/build/linux/nfpm/nfpm.yaml | sed -E 's/.*"(.*)".*/\1/')
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Versi rilis: $V"
+
+  build-macos:
+    name: macOS (universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Pasang wails3
+        run: |
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Build app bundle universal (arm64 + amd64)
+        working-directory: desktop
+        run: wails3 task darwin:package:universal
+      - name: Buat DMG
+        working-directory: desktop
+        run: wails3 task darwin:create:dmg
+      - name: Buat PKG
+        working-directory: desktop
+        run: pkgbuild --component bin/aquila.app --install-location /Applications bin/aquila.pkg
+      - name: Kumpulkan aset
+        run: |
+          mkdir -p dist
+          cp desktop/bin/aquila.dmg dist/Aquila-macOS-universal.dmg
+          cp desktop/bin/aquila.pkg dist/Aquila-macOS-universal.pkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/
+          if-no-files-found: error
+
+  build-windows:
+    name: Windows (amd64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Pasang wails3
+        run: |
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Pastikan makensis tersedia
+        shell: cmd
+        run: |
+          choco install nsis -y --no-progress
+          echo C:\Program Files (x86)\NSIS>>%GITHUB_PATH%
+      - name: Build portable exe
+        working-directory: desktop
+        run: wails3 task windows:build ARCH=amd64
+      - name: Buat installer NSIS
+        working-directory: desktop
+        run: wails3 task windows:create:nsis:installer ARCH=amd64
+      - name: Kumpulkan aset
+        run: |
+          mkdir -p dist
+          cp desktop/bin/aquila.exe dist/Aquila-windows-amd64.exe
+          cp desktop/bin/aquila-amd64-installer.exe dist/Aquila-windows-amd64-installer.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/
+          if-no-files-found: error
+
+  build-linux:
+    name: Linux (amd64)
+    needs: meta
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Pasang dependensi build (GTK4 + WebKitGTK)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev
+      - name: Pasang wails3
+        run: |
+          for attempt in 1 2 3; do
+            if go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0; then break; fi
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep 10
+          done
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Samakan versi paket dengan tag
+        run: |
+          sed -i -E "s/^version: .*/version: \"${{ needs.meta.outputs.version }}\"/" desktop/build/linux/nfpm/nfpm.yaml
+      - name: Build binary
+        working-directory: desktop
+        run: wails3 task linux:build ARCH=amd64
+      - name: Buat paket deb & rpm
+        working-directory: desktop
+        run: |
+          wails3 task linux:create:deb
+          wails3 task linux:create:rpm
+      - name: Kumpulkan aset
+        run: |
+          V="${{ needs.meta.outputs.version }}"
+          mkdir -p dist
+          cp desktop/bin/aquila.deb "dist/aquila_${V}_amd64.deb"
+          cp desktop/bin/aquila.rpm "dist/aquila-${V}-1.x86_64.rpm"
+          tar -czf dist/Aquila-linux-amd64.tar.gz -C desktop/bin aquila
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: Terbitkan rilis
+    needs: [meta, build-macos, build-windows, build-linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Buat checksums.txt
+        working-directory: dist
+        run: sha256sum $(ls | sort) > checksums.txt
+      - name: Susun catatan rilis
+        run: |
+          cat > notes.md <<EOF
+          # Aquila v${{ needs.meta.outputs.version }}
+
+          **Author:** CV ANAK BANGSA
+
+          ### Unduhan
+
+          | Platform | File | Cara Pasang |
+          | --- | --- | --- |
+          | **macOS** (Apple Silicon + Intel) | \`Aquila-macOS-universal.dmg\` | Buka → seret **Aquila** ke *Applications* |
+          | **macOS** (Apple Silicon + Intel) | \`Aquila-macOS-universal.pkg\` | Jalankan installer \`.pkg\` |
+          | **Windows** 64-bit | \`Aquila-windows-amd64-installer.exe\` | Jalankan wizard instalasi |
+          | **Windows** 64-bit (portable) | \`Aquila-windows-amd64.exe\` | Langsung jalankan — tanpa instal |
+          | **Debian / Ubuntu** | \`aquila_*_amd64.deb\` | \`sudo apt install ./aquila_*_amd64.deb\` |
+          | **Fedora / RHEL** | \`aquila-*-1.x86_64.rpm\` | \`sudo dnf install ./aquila-*.rpm\` |
+          | **Linux** (portable) | \`Aquila-linux-amd64.tar.gz\` | Ekstrak lalu jalankan \`./aquila\` |
+
+          ### Catatan
+
+          - **macOS**: build ad-hoc signed — klik kanan aplikasi → **Open** pada peluncuran pertama untuk melewati Gatekeeper.
+          - **Linux**: paket otomatis menarik dependensi GTK4 + WebKitGTK.
+          - \`print-server.json\` dibuat otomatis saat aplikasi pertama dijalankan di
+            \`~/Library/Application Support/Aquila\`, \`%AppData%\\\Aquila\`, atau \`~/.config/Aquila\`.
+          - File konfigurasi tetap ada saat instal ulang.
+          - Verifikasi unduhan dengan \`sha256sum -c checksums.txt\`.
+
+          ### Bantuan uji Windows
+
+          Tidak perlu membuka Command Prompt atau PowerShell.
+
+          1. Unduh \`Aquila-windows-amd64.exe\` untuk menjalankan versi portable.
+          2. Jika Aquila versi lama masih terbuka, tutup lewat ikon Aquila di dekat jam Windows → klik kanan → **Keluar**.
+          3. Klik dua kali file yang diunduh. Pastikan panel Aquila terbuka dan jumlah printer terdeteksi.
+          4. Jika aplikasi farmasi sudah menampilkan antrean printer PC, pilih antrean itu dan cetak halaman tes. Kabari tim apakah halaman keluar; foto pesan kesalahan juga membantu.
+
+          EOF
+      - name: Terbitkan ke GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Aquila v${{ needs.meta.outputs.version }}" \
+            --notes-file notes.md \
+            --verify-tag

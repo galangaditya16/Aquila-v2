@@ -1,0 +1,41 @@
+// Shim bindings: satu pintu masuk untuk seluruh API Go Aquila.
+// File ini hanya re-export dari bindings hasil `wails3 generate bindings`,
+// sehingga perubahan path import cukup dilakukan di satu tempat.
+export {
+  AddOrigin,
+  ClearLogs,
+  CopyServerAddress,
+  DiagnosePort,
+  ExportConfig,
+  GetAutostart,
+  GetConfig,
+  GetLogs,
+  GetOrigins,
+  GetPrinterCount,
+  GetSettings,
+  GetState,
+  HidePopup,
+  ImportConfig,
+  OpenConfigFolder,
+  OpenServerURL,
+  QuitApp,
+  ReloadConfig,
+  RemoveOrigin,
+  ResetConfig,
+  RestartService,
+  SaveSettings,
+  SetAutostart,
+  SetListen,
+  ShowPanel,
+  StartService,
+  StopService,
+  TestConnection,
+  ToggleService,
+  UninstallApp,
+  UpdateOrigin,
+} from "../bindings/github.com/RSISA-Semarang/rsisa-print-server/desktop/aquilaservice.js";
+
+export {
+  AquilaLog,
+  AquilaState,
+} from "../bindings/events/index.js";
