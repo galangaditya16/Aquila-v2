@@ -131,9 +131,9 @@ git remote add origin git@github.com:karya-anakbangsa/aquila-printers-discover.g
 git branch -M main
 git push -u origin main
 
-# 4. Buat dan dorong tag versi (contoh: v1.0.6)
-git tag v1.0.6
-git push origin v1.0.6
+# 4. Buat dan dorong tag versi (contoh: v1.0.7)
+git tag v1.0.7
+git push origin v1.0.7
 
 # 5. Tunggu Actions selesai → halaman Releases otomatis terisi semua installer
 ```

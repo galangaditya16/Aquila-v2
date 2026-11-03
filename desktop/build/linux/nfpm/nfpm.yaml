@@ -6,7 +6,7 @@
 name: "aquila"
 arch: ${GOARCH}
 platform: "linux"
-version: "1.0.6"
+version: "1.0.7"
 section: "default"
 priority: "extra"
 # Penanggung jawab paket (ganti bila diperlukan).
