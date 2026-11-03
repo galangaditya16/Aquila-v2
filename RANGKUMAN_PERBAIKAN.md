@@ -28,7 +28,7 @@ Aplikasi berjalan mulus di **macOS dan Linux**, tetapi mengalami kegagalan fungs
 
 | No | Komponen / File | Masalah Utama | Dampak | Solusi Cepat (Fase 1) | Estimasi |
 |---|---|---|---|---|---|
-| 1 | `internal/printserver/windows_pdf_print.go` | WinRT status dievaluasi sebagai string (`"Started"`) padahal integer (`0`) | Cetak PDF selalu gagal seketika | Evaluasi status integer: `$operation.Status -eq 0` | 5 mnt |
+| 1 | `internal/printserver/windows_pdf_print.go` | COM Wrapper WinRT tidak mengekspos properti `.Status` di PowerShell (`InvokeMethodOnNull`) | Cetak PDF gagal: `You cannot call a method on a null-valued expression` | Bridge WinRT via `.NET Task` (`System.WindowsRuntimeSystemExtensions.AsTask`) | 5 mnt |
 | 2 | `internal/printserver/server.go` | `ConvertTo-Json` kirim single object jika hanya ada 1 printer | PC 1 printer gagal parse JSON (0 printer) | Parsing adaptif: dukung array `[...]` dan single `{...}` | 10 mnt |
 | 3 | `internal/printserver/windows_command_windows.go` & `windows_pdf_print.go` | PowerShell diblokir GPO / Restricted Policy | Script ditolak di PC enterprise/RS | Tambahkan `-ExecutionPolicy Bypass` | 2 mnt |
 | 4 | `internal/printserver/windows_pdf_print.go` | `$e.MarginBounds` default 1 inci (25.4 mm) di tiap sisi | Kertas label etiket (50x30 mm) / thermal terpotong/kosong | Ganti ke `$e.PageBounds` | 2 mnt |
@@ -41,26 +41,26 @@ Aplikasi berjalan mulus di **macOS dan Linux**, tetapi mengalami kegagalan fungs
 ## 3. Rincian Masalah Teknis (Root Cause Analysis)
 
 ### 🔴 Masalah 1: Bug Evaluasi Async WinRT (`windows_pdf_print.go`)
-* **Lokasi File:** [`internal/printserver/windows_pdf_print.go`](file:///Users/mirza/husband/aquila-printers-discover/internal/printserver/windows_pdf_print.go#L47-L54)
-* **Kode Bermasalah:**
-  ```powershell
-  function Wait-WinRT($operation) {
-    while ($operation.Status.ToString() -eq 'Started') { [System.Threading.Thread]::Sleep(10) }
-    if ($operation.Status.ToString() -ne 'Completed') {
-      throw "PDF Windows Runtime operation failed: $($operation.Status) $($operation.ErrorCode)"
-    }
-    $operation.GetResults()
-  }
+* **Lokasi File:** [`internal/printserver/windows_pdf_print.go`](file:///Users/mirza/husband/aquila-printers-discover/internal/printserver/windows_pdf_print.go#L47-L65)
+* **Error yang Muncul:**
+  ```text
+  cetak PDF melalui driver printer Windows gagal: You cannot call a method on a null-valued expression.
+  At line:10 char:10
+  +   while ($operation.Status -eq 0 -or $operation.Status.ToString() -eq ...
+  +          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      + CategoryInfo          : InvalidOperation: (:) [], ParentContainsErrorRecordException
+      + FullyQualifiedErrorId : InvokeMethodOnNull: exit status 1
   ```
 * **Mekanisme Kegagalan:**
-  1. Di PowerShell 5.1 (bawaan Windows 10 & 11), objek asynchronous WinRT (`IAsyncOperation`) diproyeksikan sebagai COM wrapper (`System.__ComObject`).
-  2. Enum `AsyncStatus` bernilai integer (`Started = 0`, `Completed = 1`). `$operation.Status` menghasilkan integer `0`.
-  3. `$operation.Status.ToString()` menghasilkan string `"0"`, **bukan `"Started"`**.
-  4. Akibatnya:
-     * Kondisi loop `while ($operation.Status.ToString() -eq 'Started')` bernilai **FALSE** seketika.
-     * Evaluasi langsung jatuh ke `if ($operation.Status.ToString() -ne 'Completed')` (karena `"0"` != `"Completed"` bernilai **TRUE**).
-     * Script langsung melempar error: `PDF Windows Runtime operation failed: 0 0` sebelum file PDF sempat dibaca atau dicetak.
-     * Pemanggilan `.GetResults()` pada operasi yang belum selesai dapat memicu exception Win32 `E_ILLEGAL_METHOD_CALL (0x8000000E)`.
+  1. Di PowerShell 5.1 (bawaan Windows 10 & 11), objek asynchronous WinRT (`IAsyncOperation<T>` dan `IAsyncAction`) dibungkus oleh COM wrapper generic (`System.__ComObject`).
+  2. COM wrapper ini **tidak mengekspos properti `.Status`** secara langsung di pipeline PowerShell, sehingga `$operation.Status` menghasilkan `$null`.
+  3. Pada evaluasi `$operation.Status -eq 0 -or $operation.Status.ToString() -eq 'Started'`:
+     * `$operation.Status -eq 0` menghasilkan `$false` (karena `$null -eq 0` adalah `$false`).
+     * Operator `-or` lalu mengevaluasi `$operation.Status.ToString()`.
+     * Karena `$operation.Status` bernilai `$null`, pemanggilan method `.ToString()` melempar fatal exception `InvokeMethodOnNull` (`You cannot call a method on a null-valued expression`).
+  4. Selain itu, polling manual dan pemanggilan langsung `$operation.GetResults()` tidak didukung oleh COM wrapper PowerShell.
+* **Solusi Standar Resmi Microsoft:**
+  Menggunakan extension method `System.WindowsRuntimeSystemExtensions.AsTask()` via reflection untuk mengonversi WinRT `IAsyncOperation<T>` dan `IAsyncAction` menjadi standard .NET `System.Threading.Tasks.Task`, lalu memanggil `.Wait(-1)` dan mengambil `.Result`.
 
 ---
 
@@ -210,24 +210,31 @@ $null = [Windows.Data.Pdf.PdfDocument, Windows.Data.Pdf, ContentType=WindowsRunt
 $null = [Windows.Data.Pdf.PdfPageRenderOptions, Windows.Data.Pdf, ContentType=WindowsRuntime]
 $null = [Windows.Storage.Streams.InMemoryRandomAccessStream, Windows.Storage, ContentType=WindowsRuntime]
 
-function Wait-WinRT($operation) {
-  # AsyncStatus enum: Started = 0, Completed = 1, Canceled = 2, Error = 3
-  while ($operation.Status -eq 0 -or $operation.Status.ToString() -eq 'Started') { 
-    [System.Threading.Thread]::Sleep(10) 
+$asTaskGeneric = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+  $_.Name -eq 'AsTask' -and $_.IsGenericMethod -and $_.GetGenericArguments().Count -eq 1 -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name.StartsWith('IAsyncOperation')
+} | Select-Object -First 1
+$asTaskAction = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+  $_.Name -eq 'AsTask' -and (-not $_.IsGenericMethod) -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncAction'
+} | Select-Object -First 1
+function Wait-WinRT($operation, [Type]$resultType = $null) {
+  if ($null -eq $operation) { throw 'WinRT asynchronous operation bernilai null' }
+  if ($resultType) {
+    $netTask = $asTaskGeneric.MakeGenericMethod($resultType).Invoke($null, @($operation))
+    $netTask.Wait(-1) | Out-Null
+    return $netTask.Result
   }
-  if ($operation.Status -ne 1 -and $operation.Status.ToString() -ne 'Completed') { 
-    throw "PDF Windows Runtime operation failed: status=$($operation.Status) code=$($operation.ErrorCode)" 
-  }
-  $operation.GetResults()
+  $netTask = $asTaskAction.Invoke($null, @($operation))
+  $netTask.Wait(-1) | Out-Null
 }
 
-$storageFile = Wait-WinRT ([Windows.Storage.StorageFile]::GetFileFromPathAsync($env:AQUILA_PDF_PATH))
-$pdf = Wait-WinRT ([Windows.Data.Pdf.PdfDocument]::LoadFromFileAsync($storageFile))
+$pdfPath = [System.IO.Path]::GetFullPath($env:AQUILA_PDF_PATH)
+$storageFile = Wait-WinRT ([Windows.Storage.StorageFile]::GetFileFromPathAsync($pdfPath)) ([Windows.Storage.StorageFile])
+$pdf = Wait-WinRT ([Windows.Data.Pdf.PdfDocument]::LoadFromFileAsync($storageFile)) ([Windows.Data.Pdf.PdfDocument])
 if ($pdf.PageCount -lt 1) { throw 'PDF tidak memiliki halaman' }
 $doc = [System.Drawing.Printing.PrintDocument]::new()
 $doc.PrinterSettings.PrinterName = $env:AQUILA_PRINTER_NAME
 if (-not $doc.PrinterSettings.IsValid) { throw 'Antrean printer Windows tidak ditemukan' }
-$doc.PrinterSettings.Copies = [short]::Parse($env:AQUILA_COPIES)
+$doc.PrinterSettings.Copies = [int16]::Parse($env:AQUILA_COPIES)
 $doc.DocumentName = $env:AQUILA_PRINT_JOB
 $doc.PrintController = [System.Drawing.Printing.StandardPrintController]::new()
 $doc.DefaultPageSettings.Margins = [System.Drawing.Printing.Margins]::new(0, 0, 0, 0)
@@ -288,7 +295,7 @@ $doc.add_PrintPage({
     $page.Dispose()
   }
 }.GetNewClosure())
-try { $doc.Print() } finally { $doc.Dispose(); $pdf.Dispose() }`
+try { $doc.Print() } finally { $doc.Dispose() }`
 ```
 
 ---
@@ -330,7 +337,7 @@ func (c *Core) PrinterCount() int {
 
 ## 6. Checklist Verifikasi Sebelum Rilis
 
-- [ ] Unit test `TestParseWindowsPrintersHandlesSingleObject` lulus pengujian.
+- [x] Unit test `TestParseWindowsPrintersHandlesSingleObject` lulus pengujian.
 - [ ] Pengujian di PC Windows fisik dengan hanya 1 printer terpasang (memastikan printer terdeteksi).
 - [ ] Pengujian cetak dokumen etiket obat / thermal (memastikan margin tidak terpotong).
 - [ ] Pengujian cetak pada Windows dengan setting `Set-ExecutionPolicy Restricted`.

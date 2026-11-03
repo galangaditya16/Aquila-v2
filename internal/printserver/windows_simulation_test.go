@@ -8,64 +8,42 @@ import (
 	"github.com/RSISA-Semarang/rsisa-print-server/internal/utils"
 )
 
-// TestWindowsSimulation_WaitWinRT_PowerShell Logic
-// Memvalidasi logika perbaikan Wait-WinRT PowerShell agar status AsyncStatus (0 = Started, 1 = Completed)
-// dievaluasi dengan benar dan tidak throw error prematur.
-func TestWindowsSimulation_WaitWinRT_PowerShellLogic(t *testing.T) {
-	type winRTOperation struct {
-		status    any // integer (0, 1) atau string ("Started", "Completed")
-		errorCode int
+// TestWindowsSimulation_WaitWinRT_ScriptStructure
+// Memvalidasi bahwa skrip cetak PDF Windows menggunakan pola .NET Task / AsTask resmi dari
+// System.WindowsRuntimeSystemExtensions, dan tidak lagi mengandalkan $operation.Status yang dapat
+// bernilai null pada COM interop PowerShell 5.1.
+func TestWindowsSimulation_WaitWinRT_ScriptStructure(t *testing.T) {
+	script := windowsPDFPrintScript
+
+	// Tidak boleh lagi menggunakan ekspresi $operation.Status yang memicu 'InvokeMethodOnNull'
+	if strings.Contains(script, "$operation.Status") {
+		t.Fatalf("Script masih mengandung $operation.Status yang rentan null reference")
 	}
 
-	evalWaitWinRT := func(op winRTOperation) (bool, string) {
-		// Evaluasi kondisi loop while ($operation.Status -eq 0 -or $operation.Status.ToString() -eq 'Started')
-		isStarted := false
-		switch v := op.status.(type) {
-		case int:
-			if v == 0 {
-				isStarted = true
-			}
-		case string:
-			if v == "Started" || v == "0" {
-				isStarted = true
-			}
-		}
-
-		// Jika masih started, loop berlanjut
-		if isStarted {
-			// Simulasikan transisi ke Completed
-			op.status = 1
-		}
-
-		// Evaluasi kondisi if ($operation.Status -ne 1 -and $operation.Status.ToString() -ne 'Completed')
-		isCompleted := false
-		switch v := op.status.(type) {
-		case int:
-			if v == 1 {
-				isCompleted = true
-			}
-		case string:
-			if v == "Completed" || v == "1" {
-				isCompleted = true
-			}
-		}
-
-		if !isCompleted {
-			return false, "PDF Windows Runtime operation failed"
-		}
-		return true, ""
+	// Tidak boleh menggunakan type accelerator [short] yang tidak didukung PowerShell 5.1/7.x
+	if strings.Contains(script, "[short]") {
+		t.Fatalf("Script masih mengandung [short] yang tidak dikenali PowerShell ('Unable to find type [short]')")
 	}
 
-	// Kasus 1: PowerShell 5.1 COM Wrapper mengembalikan Integer 0 lalu 1
-	success, errMsg := evalWaitWinRT(winRTOperation{status: 0, errorCode: 0})
-	if !success {
-		t.Fatalf("Simulasi WinRT PowerShell 5.1 gagal: %s", errMsg)
+	// Tidak boleh memanggil Dispose() pada Windows.Data.Pdf.PdfDocument karena class tersebut tidak memiliki method Dispose
+	if strings.Contains(script, "$pdf.Dispose()") {
+		t.Fatalf("Script masih mengandung $pdf.Dispose() padahal [Windows.Data.Pdf.PdfDocument] tidak mengimplementasikan Dispose")
 	}
 
-	// Kasus 2: PowerShell yang mengembalikan string "Started" lalu "Completed"
-	success, errMsg = evalWaitWinRT(winRTOperation{status: "Started", errorCode: 0})
-	if !success {
-		t.Fatalf("Simulasi WinRT PowerShell string gagal: %s", errMsg)
+	// Wajib menggunakan AsTask dan reflection System.WindowsRuntimeSystemExtensions
+	expectedKeywords := []string{
+		"System.WindowsRuntimeSystemExtensions",
+		"AsTask",
+		"IAsyncOperation",
+		"IAsyncAction",
+		"Wait-WinRT",
+		"[int16]",
+	}
+
+	for _, kw := range expectedKeywords {
+		if !strings.Contains(script, kw) {
+			t.Fatalf("Script PDF print tidak memuat keyword wajib '%s'", kw)
+		}
 	}
 }
 

@@ -47,6 +47,17 @@ func TestParseWindowsPrintersSingleObject(t *testing.T) {
 	}
 }
 
+func TestParseWindowsPrintersHandlesSingleObject(t *testing.T) {
+	singleJSON := `{"name":"Epson L5190","state":"ready","is_default":true,"driver":"Epson Driver","port":"USB001","ip":null}`
+	got, err := parseWindowsPrinters([]byte(singleJSON))
+	if err != nil {
+		t.Fatalf("gagal membaca printer tunggal: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "Epson L5190" {
+		t.Fatalf("hasil parse tidak valid: %+v", got)
+	}
+}
+
 func TestLocalPrinterOmitsWindowsMetadataWhenUnavailable(t *testing.T) {
 	encoded, err := json.Marshal(LocalPrinter{Name: "USB Printer", State: "ready"})
 	if err != nil {
